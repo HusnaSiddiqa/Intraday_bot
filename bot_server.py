@@ -1,22 +1,35 @@
 import os
+from flask import Flask
+import threading
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import yfinance as yf
 import pandas as pd
 import pytz
 
-# Retrieve credentials securely from cloud environment variables
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "PASTE_YOUR_BOT_TOKEN_HERE")
+# 1. Tiny Flask web server so Render detects an open port (fixes the 15-min timeout)
+web_app = Flask(__name__)
+
+@web_app.route('/')
+def home():
+    return "NSE Intraday Telegram Bot is alive and running 24/7!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    web_app.run(host="0.0.0.0", port=port)
+
+# 2. Telegram Bot Configuration
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 IST = pytz.timezone("Asia/Kolkata")
 
-# Watchlist of liquid NSE stocks
+# Watchlist of liquid NSE stocks (fixed tickers)
 NSE_UNIVERSE = [
     "SBIN.NS", "TATASTEEL.NS", "ASHOKLEY.NS", "BEL.NS", "BHEL.NS",
     "TATAPOWER.NS", "HINDALCO.NS", "COALINDIA.NS", "ONGC.NS", "NTPC.NS",
     "POWERGRID.NS", "CANBK.NS", "PNB.NS", "BANKBARODA.NS", "FEDERALBNK.NS",
     "IDFCFIRSTB.NS", "NATIONALUM.NS", "NMDC.NS", "SAIL.NS", "VEDL.NS",
     "HINDCOPPER.NS", "IRFC.NS", "RVNL.NS", "IREDA.NS", "SUZLON.NS",
-    "ZOMATO.NS", "JIOFIN.NS", "MUTHOOTFIN.NS", "RECLTD.NS", "PFC.NS"
+    "JIOFIN.NS", "MUTHOOTFIN.NS", "RECLTD.NS", "PFC.NS"
 ]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -31,7 +44,6 @@ async def scan_market(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔍 Scanning live NSE tape and running VWAP + Volume filters...")
     
     try:
-        # Download latest daily & intraday data
         daily_data = yf.download(NSE_UNIVERSE, period="1mo", interval="1d", group_by="ticker", progress=False, threads=True)
         intraday_data = yf.download(NSE_UNIVERSE, period="1d", interval="5m", group_by="ticker", progress=False, threads=True)
         
@@ -62,7 +74,6 @@ async def scan_market(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 rvol_5m = c_vol / expected_5m_vol if expected_5m_vol > 0 else 0
                 day_pct_change = ((c_close - prev_close) / prev_close) * 100.0
 
-                # Basic filters
                 if 50.0 <= c_close <= 1000.0 and 0.5 <= day_pct_change <= 6.0 and c_close >= vwap:
                     score = min(rvol_5m * 10.0, 50.0) + min(day_pct_change * 10.0, 50.0)
                     candidates.append({
@@ -83,10 +94,11 @@ async def scan_market(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ No stocks met the strict volume breakout criteria right now. Market may be consolidating.")
             return
 
+        # Fixed syntax string formatting block
         response_text = "🚀 *LATEST LIVE INTRADAY SCAN RESULTS*\n\n"
         for idx, p in enumerate(top_picks, 1):
             response_text += (
-                f"*{idx}. {p['symbol']}* (Score: {p['score']}/100)\n"
+                f"*{idx}. {p['symbol']}* (Score: *{p['score']}/100*)\n"
                 f"• LTP: ₹{p['ltp']} (+{p['day_pct']}% | VWAP: ₹{p['vwap']})\n"
                 f"• Volume Surge: {p['rvol']}x normal\n\n"
             )
@@ -98,6 +110,11 @@ async def scan_market(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error fetching market data: {e}")
 
 if __name__ == "__main__":
+    # Start Flask web server in a background thread so Render detects a port immediately
+    t = threading.Thread(target=run_flask)
+    t.start()
+
+    # Start Telegram Bot Polling
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("scan", scan_market))
